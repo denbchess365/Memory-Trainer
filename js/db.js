@@ -253,8 +253,56 @@ export async function exportDeck(deckId) {
  *    the same file twice doesn't double your stats).
  * Also accepts a plain array of {question, answer, ...} for convenience.
  */
+/* ---------- Forgiving import parser ----------
+   AI tools, phone note apps and chat copy/paste often mangle JSON. Strict
+   parsing is tried first; only if it fails are these repairs applied, and
+   the list of repairs is reported back so the user knows what was fixed.
+   Also accepts plain "Question | Answer | Notes" text (one card per line). */
+export function parseImportText(text) {
+  const fixes = [];
+  let s = String(text || '').replace(/^﻿/, '').trim();
+  try { return { data: JSON.parse(s), fixes }; } catch (e) { /* repair below */ }
+
+  const step = (label, fn) => { const next = fn(s); if (next !== s) { s = next; fixes.push(label); } };
+  step('removed code fences', v => v.replace(/^```[a-zA-Z]*\s*/, '').replace(/\s*```\s*$/, ''));
+  step('removed text around the JSON', v => {
+    const start = v.search(/[[{]/), end = Math.max(v.lastIndexOf('}'), v.lastIndexOf(']'));
+    return start >= 0 && end > start ? v.slice(start, end + 1) : v;
+  });
+  step('fixed curly quotes', v => v.replace(/[“”„‟″]/g, '"').replace(/[‘’‚‛′]/g, "'"));
+  step('fixed special spaces', v => v.replace(/[   ]/g, ' '));
+  // Copying formatted chat text adds markdown escapes like \[ \] \_ \* — invalid in JSON
+  step('removed stray backslashes', v => v.replace(/\\([^"\\/bfnrtu])/g, '$1'));
+  step('added missing [ ] around tags', v => v.replace(
+    /("tags"\s*:\s*)("(?:[^"\\]|\\.)*"(?:\s*,\s*"(?:[^"\\]|\\.)*")+)(?=\s*,\s*"[^"]+"\s*:|\s*})/g, '$1[$2]'));
+  step('removed trailing commas', v => v.replace(/,(\s*[}\]])/g, '$1'));
+  try { return { data: JSON.parse(s), fixes }; } catch (e) { /* maybe it's pipe text */ }
+
+  const cards = String(text).split(/\r?\n/).map(l => {
+    const sep = l.includes('\t') ? '\t' : l.includes('|') ? '|' : null;
+    if (!sep) return null;
+    const [question, answer, ...rest] = l.split(sep).map(x => x.trim());
+    return question && answer ? { question, answer, notes: rest.join(' ').trim() } : null;
+  }).filter(Boolean);
+  if (cards.length) return { data: cards, fixes: ['read as Question | Answer lines'] };
+  throw new Error('Could not read this file. Check that it is a Memory Trainer JSON export or "Question | Answer" lines.');
+}
+
 export async function importData(data, { replace = false } = {}) {
   if (Array.isArray(data)) data = { decks: [], cards: data };
+  // Tolerate common shape mistakes: a single deck object, or a deck with cards nested inside it.
+  if (data && data.decks && !Array.isArray(data.decks)) data.decks = [data.decks];
+  if (data && Array.isArray(data.decks) && !Array.isArray(data.cards)) {
+    data.cards = data.decks.flatMap(d => (d && Array.isArray(d.cards) ? d.cards.map(c => ({ deckId: d.id, ...c })) : []));
+  }
+  if (data && Array.isArray(data.decks)) {
+    data.decks = data.decks.filter(Boolean).map(d => ({ ...d, id: d.id || 'deck-' + uid(), cards: undefined }));
+    // One deck in the file and cards without a valid deckId -> they belong to that deck.
+    if (data.decks.length === 1 && Array.isArray(data.cards)) {
+      const ids = new Set(data.decks.map(d => d.id));
+      data.cards.forEach(c => { if (c && !ids.has(c.deckId)) c.deckId = data.decks[0].id; });
+    }
+  }
   if (!data || typeof data !== 'object' || !Array.isArray(data.cards || data.decks)) {
     throw new Error('This file is not a Memory Trainer export.');
   }
@@ -269,8 +317,10 @@ export async function importData(data, { replace = false } = {}) {
     if (!raw || !raw.id || !raw.name) continue;
     const d = { ...newDeck(raw.name), ...raw };
     const cur = localDecks.get(d.id);
+    // Compare the FILE's timestamp (missing = 0), not the default we filled in,
+    // so re-importing an undated file (e.g. AI-made) never overwrites local data.
     if (!cur) { result.decksAdded++; decksOut.push(d); localDecks.set(d.id, d); }
-    else if ((d.updatedAt || 0) > (cur.updatedAt || 0)) { result.decksUpdated++; decksOut.push(d); localDecks.set(d.id, d); }
+    else if ((raw.updatedAt || 0) > (cur.updatedAt || 0)) { result.decksUpdated++; decksOut.push({ ...cur, ...raw }); localDecks.set(d.id, d); }
   }
 
   let fallbackDeck = null;
@@ -294,7 +344,12 @@ export async function importData(data, { replace = false } = {}) {
     };
     const cur = localCards.get(c.id);
     if (!cur) { result.cardsAdded++; cardsOut.push(c); }
-    else if ((c.updatedAt || 0) > (cur.updatedAt || 0)) { result.cardsUpdated++; cardsOut.push(c); }
+    else if ((raw.updatedAt || 0) > (cur.updatedAt || 0)) {
+      // Newer content wins, but study progress/favorite are kept unless the file carries its own.
+      result.cardsUpdated++;
+      cardsOut.push({ ...c, srs: raw.srs ? c.srs : cur.srs, stats: raw.stats ? c.stats : cur.stats,
+        favorite: raw.favorite ?? cur.favorite, createdAt: cur.createdAt });
+    }
     else result.cardsSkipped++;
   }
 

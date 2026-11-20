@@ -6,7 +6,7 @@
    To ship an update: change any file AND bump CACHE_VERSION.
    The app shows "An update is ready → Reload".
    ========================================================= */
-const CACHE_VERSION = 'v1.0.0';
+const CACHE_VERSION = 'v1.1.0';
 const CACHE = `memory-trainer-${CACHE_VERSION}`;
 
 // Relative URLs so the app works from a sub-path (e.g. GitHub Pages /memory-trainer/)

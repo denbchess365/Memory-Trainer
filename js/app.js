@@ -13,7 +13,7 @@ import { renderStudy, renderQuiz, MODES } from './study.js';
 import { renderStats, studyStreak } from './stats.js';
 import { SAMPLE_DECK } from './sample-deck.js';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const main = $('#main');
 let settings = { ...db.DEFAULT_SETTINGS };
 let cleanup = null;
@@ -595,7 +595,7 @@ async function viewSettings() {
     <div class="card"><div class="grid-2">
       <button class="btn" id="exportBtn">Export JSON</button>
       <button class="btn" id="importBtn">Import JSON</button></div>
-      <p class="small muted" style="margin-top:8px">Export one deck from its deck page. Import also accepts a plain JSON array of <code>{"question","answer"}</code> objects. To bring cards from Quizlet, use Quick Add → Bulk add.</p>
+      <p class="small muted" style="margin-top:8px">Export one deck from its deck page. Import is forgiving: it auto-fixes curly quotes, stray backslashes and other copy/paste damage, and also accepts a .txt file of <code>Question | Answer | Notes</code> lines (e.g. from an AI or Quizlet).</p>
     </div>
 
     <h2>Privacy & data</h2>
@@ -657,13 +657,14 @@ async function backupNow() {
 }
 
 async function importFlow(replace = false) {
-  const text = await pickFile();
+  const text = await pickFile('application/json,.json,text/plain,.txt');
   if (!text) return;
-  let data;
-  try { data = JSON.parse(text); } catch (e) { toast('That file is not valid JSON'); return; }
+  let parsed;
+  try { parsed = db.parseImportText(text); } catch (e) { toast(e.message); return; }
   try {
-    const r = await db.importData(data, { replace: replace === true });
-    toast(`Imported: ${r.decksAdded} new decks, ${r.cardsAdded} new cards, ${r.cardsUpdated} updated${r.cardsSkipped ? `, ${r.cardsSkipped} unchanged` : ''}`, { ms: 5000 });
+    const r = await db.importData(parsed.data, { replace: replace === true });
+    const fixed = parsed.fixes.length ? ` · Auto-fixed: ${parsed.fixes.join(', ')}` : '';
+    toast(`Imported: ${r.decksAdded} new decks, ${r.cardsAdded} new cards, ${r.cardsUpdated} updated${r.cardsSkipped ? `, ${r.cardsSkipped} unchanged` : ''}${fixed}`, { ms: fixed ? 9000 : 5000 });
     route();
   } catch (e) { toast(e.message || 'Import failed'); }
 }
